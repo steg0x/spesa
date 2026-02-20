@@ -1,0 +1,227 @@
+import React, { useState, useMemo } from 'react';
+
+const SpesaApp = () => {
+  const [items, setItems] = useState([]);
+  const [checkedItems, setCheckedItems] = useState(new Set());
+  const [expandedItems, setExpandedItems] = useState(new Set());
+  const [isLoaded, setIsLoaded] = useState(false);
+
+  const parseCSV = (text) => {
+    const lines = text.split('\n').filter(line => line.trim());
+    if (lines.length < 2) return [];
+
+    const headers = lines[0].split(',').map(h => h.trim().replace(/\r$/, ''));
+    
+    const parseLine = (line) => {
+      const result = [];
+      let inQuotes = false;
+      let currentValue = "";
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          result.push(currentValue);
+          currentValue = "";
+        } else {
+          currentValue += char;
+        }
+      }
+      result.push(currentValue);
+      return result;
+    };
+
+    return lines.slice(1).map((line, index) => {
+      const values = parseLine(line);
+      const obj = { id: index.toString() };
+      headers.forEach((header, i) => {
+        obj[header] = values[i] ? values[i].replace(/^"|"$/g, '').trim().replace(/\r$/, '') : '';
+      });
+      return obj;
+    }).filter(item => item['Prodotto Base']);
+  };
+
+  const handleFileUpload = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target.result;
+      const parsedData = parseCSV(text);
+      setItems(parsedData);
+      setIsLoaded(true);
+      setCheckedItems(new Set());
+      setExpandedItems(new Set());
+    };
+    reader.readAsText(file);
+  };
+
+  const toggleCheck = (id) => {
+    setCheckedItems(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const toggleExpand = (id, event) => {
+    event.stopPropagation();
+    setExpandedItems(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const resetList = () => {
+    setCheckedItems(new Set());
+  };
+
+  const categories = useMemo(() => {
+    const grouped = items.reduce((acc, item) => {
+      const category = item['Categoria'] || 'Altro';
+      if (!acc[category]) acc[category] = [];
+      acc[category].push(item);
+      return acc;
+    }, {});
+    return Object.entries(grouped).sort(([a], [b]) => a.localeCompare(b));
+  }, [items]);
+
+  const progress = items.length === 0 ? 0 : Math.round((checkedItems.size / items.length) * 100);
+
+  if (!isLoaded) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-6 font-sans">
+        <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-md text-center">
+          <svg className="w-16 h-16 mx-auto text-blue-600 mb-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+          </svg>
+          <h1 className="text-2xl font-bold text-gray-900 mb-2">Setup Lista Spesa</h1>
+          <p className="text-gray-600 mb-8">Carica il file CSV della programmazione alimentare per generare la lista interattiva ottimizzata per corsie.</p>
+          
+          <label className="relative cursor-pointer bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition-colors w-full block">
+            <span>Carica CSV</span>
+            <input 
+              type="file" 
+              accept=".csv" 
+              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+              onChange={handleFileUpload}
+            />
+          </label>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-100 pb-20 font-sans">
+      <div className="bg-blue-600 text-white sticky top-0 z-10 shadow-md p-4">
+        <div className="max-w-3xl mx-auto flex justify-between items-center">
+          <h1 className="text-xl font-bold">Gestione Spesa</h1>
+          <button onClick={resetList} className="text-sm bg-blue-800 hover:bg-blue-900 px-3 py-1 rounded">Reset</button>
+        </div>
+        <div className="max-w-3xl mx-auto mt-4">
+          <div className="flex justify-between text-sm mb-1">
+            <span>Progresso Acquisizione</span>
+            <span>{progress}%</span>
+          </div>
+          <div className="w-full bg-blue-800 rounded-full h-2">
+            <div className="bg-green-400 h-2 rounded-full transition-all duration-300" style={{ width: `${progress}%` }}></div>
+          </div>
+        </div>
+      </div>
+
+      <div className="max-w-3xl mx-auto p-4 space-y-6 mt-4">
+        {categories.map(([category, categoryItems]) => {
+          const allChecked = categoryItems.every(item => checkedItems.has(item.id));
+          
+          return (
+            <div key={category} className={`bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden ${allChecked ? 'opacity-60' : ''}`}>
+              <div className="bg-gray-50 px-4 py-3 border-b border-gray-200 flex justify-between items-center">
+                <h2 className="text-lg font-bold text-gray-800 uppercase tracking-wide">{category}</h2>
+                <span className="bg-gray-200 text-gray-700 text-xs font-bold px-2 py-1 rounded-full">
+                  {categoryItems.filter(i => checkedItems.has(i.id)).length} / {categoryItems.length}
+                </span>
+              </div>
+              
+              <ul className="divide-y divide-gray-100">
+                {categoryItems.map(item => {
+                  const isChecked = checkedItems.has(item.id);
+                  const isExpanded = expandedItems.has(item.id);
+                  const hasAlternativa = item['Alternativa e Quantita Specifica'] && item['Alternativa e Quantita Specifica'].toLowerCase() !== 'nessuna';
+                  
+                  return (
+                    <li key={item.id} className={`transition-colors ${isChecked ? 'bg-gray-50' : 'bg-white'}`}>
+                      <div 
+                        className="p-4 flex items-start gap-4 cursor-pointer hover:bg-gray-50 active:bg-gray-100"
+                        onClick={() => toggleCheck(item.id)}
+                      >
+                        <div className="mt-1 flex-shrink-0">
+                          {isChecked ? (
+                            <svg className="w-6 h-6 text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                            </svg>
+                          ) : (
+                            <svg className="w-6 h-6 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <circle cx="12" cy="12" r="9" strokeWidth="2" />
+                            </svg>
+                          )}
+                        </div>
+                        
+                        <div className="flex-grow">
+                          <div className="flex justify-between items-start">
+                            <span className={`text-base font-semibold ${isChecked ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
+                              {item['Prodotto Base']}
+                            </span>
+                            <span className={`text-sm font-bold whitespace-nowrap ml-2 ${isChecked ? 'text-gray-400' : 'text-blue-600'}`}>
+                              {item['Quantita Totale']}
+                            </span>
+                          </div>
+                          
+                          <div className="mt-1 text-sm text-gray-500">
+                            Pasto: {item['Pasto di Riferimento']} • Porzione: {item['Porzione Singola']}
+                          </div>
+
+                          {hasAlternativa && (
+                            <div className="mt-2">
+                              <button 
+                                onClick={(e) => toggleExpand(item.id, e)}
+                                className="text-sm flex items-center gap-1 text-blue-600 font-medium"
+                              >
+                                {isExpanded ? 'Nascondi alternative' : 'Vedi alternative'}
+                                <svg className={`w-4 h-4 transform transition-transform ${isExpanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+                                </svg>
+                              </button>
+                              
+                              {isExpanded && (
+                                <div className="mt-2 p-3 bg-blue-50 text-blue-900 text-sm rounded-md border border-blue-100">
+                                  <strong>Alternative:</strong> {item['Alternativa e Quantita Specifica']}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+export default SpesaApp;

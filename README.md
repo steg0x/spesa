@@ -12,7 +12,7 @@ Apri poi `http://localhost:4173`.
 
 ## Pubblicazione online con GitHub Pages
 
-Questa repo include una GitHub Action che pubblica automaticamente `index.html` su GitHub Pages.
+Questa repo include una GitHub Action che pubblica automaticamente il sito statico su GitHub Pages.
 
 ### 1) Pusha il repository su GitHub
 

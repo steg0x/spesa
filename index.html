@@ -3,303 +3,369 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Gestione Spesa</title>
+    <title>Lista della Spesa</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   </head>
   <body class="bg-gray-50">
     <div id="root"></div>
 
     <script type="text/babel">
-      const { useState, useMemo } = React;
+      const { useState, useMemo, useEffect, useRef, useCallback } = React;
 
+      // localStorage keys — versioned to avoid conflicts with old data
+      const LS_ITEMS   = 'spesa_items_v3';
+      const LS_CHECKED = 'spesa_checked_v3';
+      const LS_META    = 'spesa_meta_v3';
+
+      // ─── Parse an array-of-arrays (from XLSX or CSV) into item objects ───────
+      const parseRows = (rows) => {
+        // Find the header row (contains "categoria" or "prodotto")
+        let headerIdx = -1;
+        for (let i = 0; i < Math.min(rows.length, 6); i++) {
+          const r = rows[i].map(c => String(c || '').toLowerCase());
+          if (r.some(c => c.includes('categ') || c.includes('prodotto'))) {
+            headerIdx = i;
+            break;
+          }
+        }
+        if (headerIdx === -1) return [];
+
+        const headers = rows[headerIdx].map(c =>
+          String(c || '').replace(/\n/g, ' ').trim()
+        );
+
+        // Map column indices flexibly
+        const idx = (kw1, kw2) => headers.findIndex(h => {
+          const l = h.toLowerCase();
+          return l.includes(kw1) && (!kw2 || l.includes(kw2));
+        });
+
+        const colCat  = idx('categ');
+        const colProd = idx('prodotto');
+        const colQty  = idx('quant', 'tot');   // "quantità totale"
+        const colPorz = idx('porzion');
+        const colPast = idx('pasto');
+        const colAlt  = idx('altern');
+
+        const items = [];
+        for (let i = headerIdx + 1; i < rows.length; i++) {
+          const row = rows[i];
+          const prodotto = String(row[colProd] ?? '').trim();
+          if (!prodotto) continue;                                   // sezione o riga vuota
+          const qty = String(row[colQty] ?? '').trim();
+          if (!qty) continue;                                        // header di sezione (merged)
+
+          items.push({
+            id: String(i),
+            cat:    String(row[colCat]  ?? '').trim(),
+            prod:   prodotto,
+            qty:    qty,
+            porz:   colPorz >= 0 ? String(row[colPorz] ?? '').trim() : '',
+            pasto:  colPast >= 0 ? String(row[colPast] ?? '').trim() : '',
+            alt:    colAlt  >= 0 ? String(row[colAlt]  ?? '').trim() : '',
+          });
+        }
+        return items;
+      };
+
+      // ─── Parse a CSV text into array-of-arrays ────────────────────────────────
+      const csvToRows = (text) => {
+        const splitLine = (line) => {
+          const result = [];
+          let inQ = false, cur = '';
+          for (const ch of line) {
+            if (ch === '"') { inQ = !inQ; }
+            else if (ch === ',' && !inQ) { result.push(cur); cur = ''; }
+            else { cur += ch; }
+          }
+          result.push(cur);
+          return result.map(v => v.replace(/^"|"$/g, '').replace(/\r$/, ''));
+        };
+        return text.split('\n').filter(l => l.trim()).map(splitLine);
+      };
+
+      // ─── Main App ─────────────────────────────────────────────────────────────
       const SpesaApp = () => {
-        const [items, setItems] = useState([]);
-        const [checkedItems, setCheckedItems] = useState(new Set());
-        const [expandedItems, setExpandedItems] = useState(new Set());
-        const [isLoaded, setIsLoaded] = useState(false);
+        const [items,        setItems]        = useState([]);
+        const [checkedIds,   setCheckedIds]   = useState(new Set());
+        const [expandedIds,  setExpandedIds]  = useState(new Set());
+        const [isLoaded,     setIsLoaded]     = useState(false);
+        const [meta,         setMeta]         = useState(null);   // { name, date }
+        const [showConfirm,  setShowConfirm]  = useState(false);
+        const fileRef = useRef(null);
 
-        const parseCSV = (text) => {
-          const lines = text.split('\n').filter((line) => line.trim());
-          if (lines.length < 2) return [];
-
-          const headers = lines[0]
-            .split(',')
-            .map((h) => h.trim().replace(/\r$/, ''));
-
-          const parseLine = (line) => {
-            const result = [];
-            let inQuotes = false;
-            let currentValue = '';
-
-            for (let i = 0; i < line.length; i += 1) {
-              const char = line[i];
-              if (char === '"') {
-                inQuotes = !inQuotes;
-              } else if (char === ',' && !inQuotes) {
-                result.push(currentValue);
-                currentValue = '';
-              } else {
-                currentValue += char;
+        // ── Load from localStorage on first render ─────────────────────────────
+        useEffect(() => {
+          try {
+            const raw = localStorage.getItem(LS_ITEMS);
+            if (raw) {
+              const saved = JSON.parse(raw);
+              if (saved?.length > 0) {
+                setItems(saved);
+                setIsLoaded(true);
               }
             }
+            const rawC = localStorage.getItem(LS_CHECKED);
+            if (rawC) setCheckedIds(new Set(JSON.parse(rawC)));
 
-            result.push(currentValue);
-            return result;
-          };
+            const rawM = localStorage.getItem(LS_META);
+            if (rawM) setMeta(JSON.parse(rawM));
+          } catch (_) {}
+        }, []);
 
-          return lines
-            .slice(1)
-            .map((line, index) => {
-              const values = parseLine(line);
-              const obj = { id: index.toString() };
-              headers.forEach((header, i) => {
-                obj[header] = values[i]
-                  ? values[i].replace(/^"|"$/g, '').trim().replace(/\r$/, '')
-                  : '';
-              });
-              return obj;
-            })
-            .filter((item) => item['Prodotto Base']);
-        };
-
-        const handleFileUpload = (event) => {
-          const file = event.target.files[0];
-          if (!file) return;
-
-          const reader = new FileReader();
-          reader.onload = (e) => {
-            const text = e.target.result;
-            const parsedData = parseCSV(text);
-            setItems(parsedData);
-            setIsLoaded(true);
-            setCheckedItems(new Set());
-            setExpandedItems(new Set());
-          };
-          reader.readAsText(file);
-        };
-
-        const toggleCheck = (id) => {
-          setCheckedItems((prev) => {
-            const next = new Set(prev);
-            if (next.has(id)) {
-              next.delete(id);
-            } else {
-              next.add(id);
-            }
-            return next;
-          });
-        };
-
-        const toggleExpand = (id, event) => {
-          event.stopPropagation();
-          setExpandedItems((prev) => {
-            const next = new Set(prev);
-            if (next.has(id)) {
-              next.delete(id);
-            } else {
-              next.add(id);
-            }
-            return next;
-          });
-        };
-
-        const resetList = () => {
-          setCheckedItems(new Set());
-        };
-
-        const categories = useMemo(() => {
-          const grouped = items.reduce((acc, item) => {
-            const category = item.Categoria || 'Altro';
-            if (!acc[category]) acc[category] = [];
-            acc[category].push(item);
-            return acc;
-          }, {});
-          return Object.entries(grouped).sort(([a], [b]) => a.localeCompare(b));
+        // ── Persist items ──────────────────────────────────────────────────────
+        useEffect(() => {
+          if (items.length > 0)
+            localStorage.setItem(LS_ITEMS, JSON.stringify(items));
         }, [items]);
 
-        const progress =
-          items.length === 0 ? 0 : Math.round((checkedItems.size / items.length) * 100);
+        // ── Persist checked state ──────────────────────────────────────────────
+        useEffect(() => {
+          localStorage.setItem(LS_CHECKED, JSON.stringify([...checkedIds]));
+        }, [checkedIds]);
 
+        // ── Load a file (CSV or XLSX) ──────────────────────────────────────────
+        const loadFile = useCallback((file) => {
+          if (!file) return;
+          const ext = file.name.split('.').pop().toLowerCase();
+          const newMeta = {
+            name: file.name,
+            date: new Date().toLocaleDateString('it-IT', { day: '2-digit', month: 'long', year: 'numeric' }),
+          };
+
+          const finish = (rows) => {
+            const parsed = parseRows(rows);
+            if (parsed.length === 0) {
+              alert('Nessun dato trovato nel file. Verifica il formato.');
+              return;
+            }
+            setItems(parsed);
+            setCheckedIds(new Set());
+            setExpandedIds(new Set());
+            setMeta(newMeta);
+            setIsLoaded(true);
+            localStorage.setItem(LS_META, JSON.stringify(newMeta));
+          };
+
+          const reader = new FileReader();
+          if (ext === 'csv') {
+            reader.onload = e => finish(csvToRows(e.target.result));
+            reader.readAsText(file);
+          } else {
+            reader.onload = e => {
+              const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array' });
+              const ws = wb.Sheets[wb.SheetNames[0]];
+              finish(XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }));
+            };
+            reader.readAsArrayBuffer(file);
+          }
+        }, []);
+
+        const handleFileInput = (e) => loadFile(e.target.files[0]);
+
+        const toggleCheck = (id) => setCheckedIds(prev => {
+          const next = new Set(prev);
+          next.has(id) ? next.delete(id) : next.add(id);
+          return next;
+        });
+
+        const toggleExpand = (id, e) => {
+          e.stopPropagation();
+          setExpandedIds(prev => {
+            const next = new Set(prev);
+            next.has(id) ? next.delete(id) : next.add(id);
+            return next;
+          });
+        };
+
+        const resetChecks = () => setCheckedIds(new Set());
+
+        const categories = useMemo(() => {
+          const grouped = {};
+          for (const item of items) {
+            const c = item.cat || 'Altro';
+            if (!grouped[c]) grouped[c] = [];
+            grouped[c].push(item);
+          }
+          return Object.entries(grouped);
+        }, [items]);
+
+        const total    = items.length;
+        const checked  = checkedIds.size;
+        const progress = total === 0 ? 0 : Math.round((checked / total) * 100);
+        const done     = progress === 100;
+
+        // Hidden file input (always mounted so ref works)
+        const fileInput = (
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".csv,.xlsx,.xls"
+            className="hidden"
+            onChange={handleFileInput}
+            // Reset value so same file can be reloaded
+            onClick={e => { e.target.value = ''; }}
+          />
+        );
+
+        // ── Upload screen ──────────────────────────────────────────────────────
         if (!isLoaded) {
           return (
-            <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-6 font-sans">
-              <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-md text-center">
-                <svg
-                  className="w-16 h-16 mx-auto text-blue-600 mb-6"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"
-                  />
-                </svg>
-                <h1 className="text-2xl font-bold text-gray-900 mb-2">Setup Lista Spesa</h1>
-                <p className="text-gray-600 mb-8">
-                  Carica il file CSV della programmazione alimentare per generare la lista
-                  interattiva ottimizzata per corsie.
+            <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-gradient-to-b from-blue-50 to-gray-100">
+              {fileInput}
+              <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-sm text-center">
+                <div className="text-5xl mb-4">🛒</div>
+                <h1 className="text-2xl font-bold text-gray-900 mb-1">Lista della Spesa</h1>
+                <p className="text-gray-500 text-sm mb-8">
+                  Carica il file Excel o CSV settimanale per iniziare.
                 </p>
-
-                <label className="relative cursor-pointer bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition-colors w-full block">
-                  <span>Carica CSV</span>
-                  <input
-                    type="file"
-                    accept=".csv"
-                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                    onChange={handleFileUpload}
-                  />
-                </label>
+                <button
+                  onClick={() => fileRef.current?.click()}
+                  className="w-full bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-semibold py-3 px-6 rounded-xl shadow transition-colors text-base"
+                >
+                  📂 Carica Lista
+                </button>
+                <p className="text-gray-400 text-xs mt-4">Supporta file .xlsx e .csv</p>
               </div>
             </div>
           );
         }
 
+        // ── Main shopping view ─────────────────────────────────────────────────
         return (
-          <div className="min-h-screen bg-gray-100 pb-20 font-sans">
-            <div className="bg-blue-600 text-white sticky top-0 z-10 shadow-md p-4">
-              <div className="max-w-3xl mx-auto flex justify-between items-center">
-                <h1 className="text-xl font-bold">Gestione Spesa</h1>
-                <button
-                  onClick={resetList}
-                  className="text-sm bg-blue-800 hover:bg-blue-900 px-3 py-1 rounded"
-                >
-                  Reset
-                </button>
-              </div>
-              <div className="max-w-3xl mx-auto mt-4">
-                <div className="flex justify-between text-sm mb-1">
-                  <span>Progresso Acquisizione</span>
-                  <span>{progress}%</span>
+          <div className="min-h-screen bg-gray-100 pb-24">
+            {fileInput}
+
+            {/* ── Sticky Header ── */}
+            <div className={`sticky top-0 z-20 shadow-md px-4 pt-3 pb-3 transition-colors ${done ? 'bg-green-600' : 'bg-blue-600'} text-white`}>
+              <div className="max-w-2xl mx-auto">
+                {/* Top row */}
+                <div className="flex justify-between items-start gap-2">
+                  <div className="min-w-0">
+                    <h1 className="text-lg font-bold leading-tight truncate">
+                      {done ? '✅ Spesa completata!' : '🛒 Lista della Spesa'}
+                    </h1>
+                    {meta && (
+                      <p className="text-blue-200 text-xs mt-0.5 truncate">
+                        {meta.name} · {meta.date}
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex gap-1.5 flex-shrink-0">
+                    <button
+                      onClick={resetChecks}
+                      className="text-xs bg-white/20 hover:bg-white/30 active:bg-white/40 px-2.5 py-1.5 rounded-lg font-medium"
+                    >
+                      ↺ Reset
+                    </button>
+                    <button
+                      onClick={() => setShowConfirm(true)}
+                      className="text-xs bg-white/20 hover:bg-white/30 active:bg-white/40 px-2.5 py-1.5 rounded-lg font-medium"
+                    >
+                      📂 Cambia
+                    </button>
+                  </div>
                 </div>
-                <div className="w-full bg-blue-800 rounded-full h-2">
-                  <div
-                    className="bg-green-400 h-2 rounded-full transition-all duration-300"
-                    style={{ width: `${progress}%` }}
-                  ></div>
+
+                {/* Progress bar */}
+                <div className="mt-2.5">
+                  <div className="flex justify-between text-xs opacity-80 mb-1">
+                    <span>{checked} di {total} prodotti</span>
+                    <span className="font-bold">{progress}%</span>
+                  </div>
+                  <div className="w-full bg-white/25 rounded-full h-2">
+                    <div
+                      className={`h-2 rounded-full transition-all duration-300 ${done ? 'bg-white' : 'bg-green-400'}`}
+                      style={{ width: `${progress}%` }}
+                    />
+                  </div>
                 </div>
               </div>
             </div>
 
-            <div className="max-w-3xl mx-auto p-4 space-y-6 mt-4">
-              {categories.map(([category, categoryItems]) => {
-                const allChecked = categoryItems.every((item) => checkedItems.has(item.id));
+            {/* ── Category Cards ── */}
+            <div className="max-w-2xl mx-auto px-3 pt-3 space-y-3">
+              {categories.map(([cat, catItems]) => {
+                const catChecked = catItems.filter(i => checkedIds.has(i.id)).length;
+                const allCatDone = catChecked === catItems.length;
 
                 return (
                   <div
-                    key={category}
-                    className={`bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden ${
-                      allChecked ? 'opacity-60' : ''
-                    }`}
+                    key={cat}
+                    className={`bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden transition-opacity duration-300 ${allCatDone ? 'opacity-40' : ''}`}
                   >
-                    <div className="bg-gray-50 px-4 py-3 border-b border-gray-200 flex justify-between items-center">
-                      <h2 className="text-lg font-bold text-gray-800 uppercase tracking-wide">
-                        {category}
-                      </h2>
-                      <span className="bg-gray-200 text-gray-700 text-xs font-bold px-2 py-1 rounded-full">
-                        {categoryItems.filter((i) => checkedItems.has(i.id)).length} /{' '}
-                        {categoryItems.length}
+                    {/* Category header */}
+                    <div className="flex justify-between items-center px-4 py-2 bg-gray-50 border-b border-gray-100">
+                      <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">{cat}</span>
+                      <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${allCatDone ? 'bg-green-100 text-green-700' : 'bg-blue-50 text-blue-600'}`}>
+                        {catChecked}/{catItems.length}
                       </span>
                     </div>
 
-                    <ul className="divide-y divide-gray-100">
-                      {categoryItems.map((item) => {
-                        const isChecked = checkedItems.has(item.id);
-                        const isExpanded = expandedItems.has(item.id);
-                        const hasAlternativa =
-                          item['Alternativa e Quantita Specifica'] &&
-                          item['Alternativa e Quantita Specifica'].toLowerCase() !== 'nessuna';
+                    {/* Items */}
+                    <ul className="divide-y divide-gray-50">
+                      {catItems.map(item => {
+                        const isCk = checkedIds.has(item.id);
+                        const isEx = expandedIds.has(item.id);
+                        const altText = item.alt;
+                        const hasAlt = altText && altText !== '—' && altText.trim() !== '' && altText.toLowerCase() !== 'nessuna';
 
                         return (
-                          <li
-                            key={item.id}
-                            className={`transition-colors ${isChecked ? 'bg-gray-50' : 'bg-white'}`}
-                          >
+                          <li key={item.id}>
                             <div
-                              className="p-4 flex items-start gap-4 cursor-pointer hover:bg-gray-50 active:bg-gray-100"
+                              className={`px-4 py-3 flex items-start gap-3 cursor-pointer select-none active:bg-gray-50 ${isCk ? 'bg-gray-50' : 'bg-white'}`}
                               onClick={() => toggleCheck(item.id)}
                             >
-                              <div className="mt-1 flex-shrink-0">
-                                {isChecked ? (
-                                  <svg
-                                    className="w-6 h-6 text-green-500"
-                                    fill="currentColor"
-                                    viewBox="0 0 20 20"
-                                  >
-                                    <path
-                                      fillRule="evenodd"
-                                      d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
-                                      clipRule="evenodd"
-                                    />
+                              {/* Checkbox */}
+                              <div className="mt-0.5 flex-shrink-0">
+                                {isCk ? (
+                                  <svg className="w-6 h-6 text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
                                   </svg>
                                 ) : (
-                                  <svg
-                                    className="w-6 h-6 text-gray-300"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                  >
+                                  <svg className="w-6 h-6 text-gray-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <circle cx="12" cy="12" r="9" strokeWidth="2" />
                                   </svg>
                                 )}
                               </div>
 
-                              <div className="flex-grow">
-                                <div className="flex justify-between items-start">
-                                  <span
-                                    className={`text-base font-semibold ${
-                                      isChecked ? 'text-gray-400 line-through' : 'text-gray-900'
-                                    }`}
-                                  >
-                                    {item['Prodotto Base']}
+                              {/* Content */}
+                              <div className="flex-1 min-w-0">
+                                {/* Product + qty */}
+                                <div className="flex justify-between items-start gap-2">
+                                  <span className={`font-semibold text-base leading-tight ${isCk ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
+                                    {item.prod}
                                   </span>
-                                  <span
-                                    className={`text-sm font-bold whitespace-nowrap ml-2 ${
-                                      isChecked ? 'text-gray-400' : 'text-blue-600'
-                                    }`}
-                                  >
-                                    {item['Quantita Totale']}
+                                  <span className={`text-sm font-bold whitespace-nowrap flex-shrink-0 ${isCk ? 'text-gray-400' : 'text-blue-600'}`}>
+                                    {item.qty}
                                   </span>
                                 </div>
 
-                                <div className="mt-1 text-sm text-gray-500">
-                                  Pasto: {item['Pasto di Riferimento']} • Porzione:{' '}
-                                  {item['Porzione Singola']}
-                                </div>
+                                {/* Pasto + porzione */}
+                                {(item.pasto || item.porz) && (
+                                  <div className="mt-0.5 text-xs text-gray-400 leading-snug">
+                                    {item.pasto && <span>📍 {item.pasto}</span>}
+                                    {item.pasto && item.porz && <span className="mx-1">·</span>}
+                                    {item.porz && <span>📦 {item.porz}</span>}
+                                  </div>
+                                )}
 
-                                {hasAlternativa && (
+                                {/* Alternatives */}
+                                {hasAlt && (
                                   <div className="mt-2">
                                     <button
-                                      onClick={(e) => toggleExpand(item.id, e)}
-                                      className="text-sm flex items-center gap-1 text-blue-600 font-medium"
+                                      onClick={e => toggleExpand(item.id, e)}
+                                      className="text-xs text-blue-500 font-medium flex items-center gap-1"
                                     >
-                                      {isExpanded ? 'Nascondi alternative' : 'Vedi alternative'}
-                                      <svg
-                                        className={`w-4 h-4 transform transition-transform ${
-                                          isExpanded ? 'rotate-180' : ''
-                                        }`}
-                                        fill="none"
-                                        stroke="currentColor"
-                                        viewBox="0 0 24 24"
-                                      >
-                                        <path
-                                          strokeLinecap="round"
-                                          strokeLinejoin="round"
-                                          strokeWidth="2"
-                                          d="M19 9l-7 7-7-7"
-                                        />
-                                      </svg>
+                                      {isEx ? '▲ Nascondi' : '▼ Alternative'}
                                     </button>
-
-                                    {isExpanded && (
-                                      <div className="mt-2 p-3 bg-blue-50 text-blue-900 text-sm rounded-md border border-blue-100">
-                                        <strong>Alternative:</strong>{' '}
-                                        {item['Alternativa e Quantita Specifica']}
+                                    {isEx && (
+                                      <div className="mt-1.5 p-2.5 bg-amber-50 border border-amber-100 rounded-lg text-xs text-amber-900 leading-relaxed whitespace-pre-line">
+                                        {altText}
                                       </div>
                                     )}
                                   </div>
@@ -313,13 +379,47 @@
                   </div>
                 );
               })}
+
+              {done && (
+                <div className="text-center py-6">
+                  <div className="text-4xl mb-2">🎉</div>
+                  <p className="text-green-700 font-bold text-lg">Spesa completata!</p>
+                  <p className="text-gray-400 text-sm mt-1">Tutti i prodotti sono stati acquisiti.</p>
+                </div>
+              )}
             </div>
+
+            {/* ── Confirm dialog for "Cambia lista" ── */}
+            {showConfirm && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-6">
+                <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 text-center">
+                  <div className="text-3xl mb-3">📂</div>
+                  <h2 className="text-lg font-bold text-gray-900 mb-1">Cambia lista?</h2>
+                  <p className="text-gray-500 text-sm mb-5">
+                    Caricare una nuova lista cancellerà le spunte e la lista corrente.
+                  </p>
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => setShowConfirm(false)}
+                      className="flex-1 py-2.5 rounded-xl border border-gray-200 text-gray-700 font-medium text-sm"
+                    >
+                      Annulla
+                    </button>
+                    <button
+                      onClick={() => { setShowConfirm(false); fileRef.current?.click(); }}
+                      className="flex-1 py-2.5 rounded-xl bg-blue-600 text-white font-semibold text-sm"
+                    >
+                      Carica nuova
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         );
       };
 
-      const root = ReactDOM.createRoot(document.getElementById('root'));
-      root.render(<SpesaApp />);
+      ReactDOM.createRoot(document.getElementById('root')).render(<SpesaApp />);
     </script>
   </body>
 </html>
